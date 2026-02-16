@@ -77,6 +77,15 @@ class TestBuildSummaryReport:
         report = build_summary_report({}, wall_clock_seconds=42.5)
         assert report["wall_clock_seconds"] == 42.5
 
+    def test_throughput_recorded(self):
+        results = {
+            "gpqa": [_make_result(score=1.0), _make_result(score=0.0)],
+        }
+        report = build_summary_report(results, wall_clock_seconds=10.0)
+        # 2 samples / 10 seconds = 0.2 rps
+        assert report["tasks"]["gpqa"]["throughput_rps"] == 0.2
+        assert report["overall"]["throughput_rps"] == 0.2
+
 
 class TestResultsToJsonl:
     """Test JSONL record conversion."""
