@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,6 +13,8 @@ from tqdm import tqdm
 
 from eval_harness.client import ClientResponse, EvalClient
 from eval_harness.config import EvalConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -119,25 +122,64 @@ class BaseTask(ABC):
         )
 
     def run(self, client: EvalClient) -> list[SampleResult]:
-        """Run the full evaluation with concurrent requests."""
+        """Run the full evaluation, processing samples in batches.
+
+        Samples are split into chunks of ``batch_size`` (from config).  Each
+        batch is dispatched concurrently via a thread-pool of ``max_workers``.
+        A single progress bar spans the entire dataset so the user sees smooth,
+        continuous progress across batches.
+
+        This keeps memory usage bounded and makes intermediate progress visible
+        without changing the OpenAI-compatible request path (each sample still
+        results in one ``/v1/chat/completions`` call).
+        """
         dataset = self.load_dataset()
+        total = len(dataset)
         results: list[SampleResult] = []
+
         max_workers = self.config.concurrency.max_workers
+        batch_size = self.config.concurrency.batch_size
+        num_batches = (total + batch_size - 1) // batch_size
+
+        logger.info(
+            "%s: %d samples, batch_size=%d (%d batches), max_workers=%d",
+            self.task_name,
+            total,
+            batch_size,
+            num_batches,
+            max_workers,
+        )
 
         def _eval(args: tuple[int, dict[str, Any]]) -> SampleResult:
             idx, sample = args
             return self.evaluate_sample(client, sample, str(idx))
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(_eval, (idx, sample)): idx
-                for idx, sample in enumerate(dataset)
-            }
-            with tqdm(total=len(dataset), desc=self.task_name) as pbar:
-                for future in as_completed(futures):
-                    results.append(future.result())
-                    pbar.update(1)
+        with tqdm(total=total, desc=self.task_name) as pbar:
+            for batch_idx in range(num_batches):
+                start = batch_idx * batch_size
+                end = min(start + batch_size, total)
+                batch = [
+                    (idx, dataset[idx]) for idx in range(start, end)
+                ]
 
-        # Sort by sample_id to maintain order
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = {
+                        executor.submit(_eval, item): item[0]
+                        for item in batch
+                    }
+                    for future in as_completed(futures):
+                        results.append(future.result())
+                        pbar.update(1)
+
+                logger.debug(
+                    "%s: batch %d/%d complete (%d-%d)",
+                    self.task_name,
+                    batch_idx + 1,
+                    num_batches,
+                    start,
+                    end - 1,
+                )
+
+        # Sort by sample_id to maintain deterministic order
         results.sort(key=lambda r: int(r.sample_id))
         return results
