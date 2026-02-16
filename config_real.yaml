@@ -18,4 +18,4 @@ concurrency:
   batch_size: 50
 
 output:
-  results_dir: "results_test"
+  results_dir: "results_real"

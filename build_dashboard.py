@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Build a self-contained HTML dashboard from evaluation results."""
 
+import argparse
 import json
 from pathlib import Path
 
-RESULTS_DIR = Path("results")
+import yaml
+
 OUT_PATH = Path("dashboard.html")
 
 
@@ -14,11 +16,22 @@ def load_jsonl(path: Path) -> list[dict]:
 
 
 def main():
-    summary = json.loads((RESULTS_DIR / "summary_report.json").read_text())
-    gpqa = load_jsonl(RESULTS_DIR / "gpqa_results.jsonl")
-    math500 = load_jsonl(RESULTS_DIR / "math500_results.jsonl")
-    lcb = load_jsonl(RESULTS_DIR / "livecodebench_results.jsonl")
-    errors = load_jsonl(RESULTS_DIR / "error_log.jsonl")
+    parser = argparse.ArgumentParser(description="Build evaluation dashboard")
+    parser.add_argument(
+        "--config", default="config.yaml",
+        help="Path to config YAML (reads output.results_dir). Default: config.yaml",
+    )
+    args = parser.parse_args()
+
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
+    results_dir = Path(cfg.get("output", {}).get("results_dir", "results"))
+
+    summary = json.loads((results_dir / "summary_report.json").read_text())
+    gpqa = load_jsonl(results_dir / "gpqa_results.jsonl")
+    math500 = load_jsonl(results_dir / "math500_results.jsonl")
+    lcb = load_jsonl(results_dir / "livecodebench_results.jsonl")
+    errors = load_jsonl(results_dir / "error_log.jsonl")
 
     # Truncate long fields for browser performance
     for rec in gpqa + math500 + lcb:
