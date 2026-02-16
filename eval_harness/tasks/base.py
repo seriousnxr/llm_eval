@@ -1,0 +1,143 @@
+"""Abstract base class for evaluation tasks."""
+
+from __future__ import annotations
+
+import time
+from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from typing import Any
+
+from tqdm import tqdm
+
+from eval_harness.client import ClientResponse, EvalClient
+from eval_harness.config import EvalConfig
+
+
+@dataclass
+class SampleResult:
+    """Result for a single evaluation sample."""
+
+    task: str
+    sample_id: str
+    prompt: str
+    raw_response: str
+    parsed_answer: str | None
+    normalized_answer: str | None
+    ground_truth: str
+    score: float
+    error_category: str
+    latency_ms: float
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+class BaseTask(ABC):
+    """Abstract base for evaluation tasks.
+
+    Subclasses implement dataset loading, prompt formatting,
+    answer extraction, and scoring.
+    """
+
+    task_name: str = "base"
+
+    def __init__(self, config: EvalConfig) -> None:
+        self.config = config
+
+    @abstractmethod
+    def load_dataset(self) -> list[dict[str, Any]]:
+        """Load and return the evaluation dataset."""
+        ...
+
+    @abstractmethod
+    def format_prompt(self, sample: dict[str, Any]) -> list[dict[str, str]]:
+        """Format a sample into chat messages for the API."""
+        ...
+
+    @abstractmethod
+    def extract_answer(self, response: str) -> str | None:
+        """Extract the predicted answer from the model response."""
+        ...
+
+    @abstractmethod
+    def normalize_answer(self, answer: str | None) -> str | None:
+        """Normalize the extracted answer for comparison."""
+        ...
+
+    @abstractmethod
+    def get_ground_truth(self, sample: dict[str, Any]) -> str:
+        """Return the ground truth answer for a sample."""
+        ...
+
+    @abstractmethod
+    def score(self, predicted: str | None, ground_truth: str) -> float:
+        """Score a prediction against ground truth. Returns 0.0 or 1.0."""
+        ...
+
+    def evaluate_sample(
+        self, client: EvalClient, sample: dict[str, Any], sample_id: str
+    ) -> SampleResult:
+        """Run evaluation on a single sample."""
+        messages = self.format_prompt(sample)
+        prompt_text = messages[-1]["content"] if messages else ""
+
+        response = client.chat_completion(messages)
+
+        if response.error_category != "none":
+            return SampleResult(
+                task=self.task_name,
+                sample_id=sample_id,
+                prompt=prompt_text,
+                raw_response=response.content,
+                parsed_answer=None,
+                normalized_answer=None,
+                ground_truth=self.get_ground_truth(sample),
+                score=0.0,
+                error_category=response.error_category,
+                latency_ms=response.latency_ms,
+            )
+
+        parsed = self.extract_answer(response.content)
+        normalized = self.normalize_answer(parsed)
+        ground_truth = self.get_ground_truth(sample)
+        result_score = self.score(normalized, ground_truth)
+
+        error_cat = "none"
+        if parsed is None:
+            error_cat = "parse_failure"
+
+        return SampleResult(
+            task=self.task_name,
+            sample_id=sample_id,
+            prompt=prompt_text,
+            raw_response=response.content,
+            parsed_answer=parsed,
+            normalized_answer=normalized,
+            ground_truth=ground_truth,
+            score=result_score,
+            error_category=error_cat,
+            latency_ms=response.latency_ms,
+        )
+
+    def run(self, client: EvalClient) -> list[SampleResult]:
+        """Run the full evaluation with concurrent requests."""
+        dataset = self.load_dataset()
+        results: list[SampleResult] = []
+        max_workers = self.config.concurrency.max_workers
+
+        def _eval(args: tuple[int, dict[str, Any]]) -> SampleResult:
+            idx, sample = args
+            return self.evaluate_sample(client, sample, str(idx))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_eval, (idx, sample)): idx
+                for idx, sample in enumerate(dataset)
+            }
+            with tqdm(total=len(dataset), desc=self.task_name) as pbar:
+                for future in as_completed(futures):
+                    results.append(future.result())
+                    pbar.update(1)
+
+        # Sort by sample_id to maintain order
+        results.sort(key=lambda r: int(r.sample_id))
+        return results
