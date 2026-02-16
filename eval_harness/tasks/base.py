@@ -122,16 +122,20 @@ class BaseTask(ABC):
         )
 
     def run(self, client: EvalClient) -> list[SampleResult]:
-        """Run the full evaluation, processing samples in batches.
+        """Run the full evaluation with a single thread-pool.
 
-        Samples are split into chunks of ``batch_size`` (from config).  Each
-        batch is dispatched concurrently via a thread-pool of ``max_workers``.
-        A single progress bar spans the entire dataset so the user sees smooth,
-        continuous progress across batches.
+        All samples are submitted to one ``ThreadPoolExecutor`` whose
+        ``max_workers`` caps concurrency.  Workers are never idle between
+        batches because there are no batch boundaries — as soon as one
+        sample completes, the executor immediately starts the next queued
+        sample.
 
-        This keeps memory usage bounded and makes intermediate progress visible
-        without changing the OpenAI-compatible request path (each sample still
-        results in one ``/v1/chat/completions`` call).
+        ``batch_size`` is used only for periodic checkpoint logging so the
+        operator can see progress at a coarser grain than per-sample.
+
+        Each sample results in exactly one ``/v1/chat/completions`` call
+        (the standard OpenAI endpoint does not support multi-prompt
+        requests).
         """
         dataset = self.load_dataset()
         total = len(dataset)
@@ -141,67 +145,59 @@ class BaseTask(ABC):
 
         max_workers = self.config.concurrency.max_workers
         batch_size = self.config.concurrency.batch_size
-        num_batches = (total + batch_size - 1) // batch_size
 
         logger.info(
-            "%s: %d samples, batch_size=%d (%d batches), max_workers=%d",
+            "%s: %d samples, max_workers=%d, checkpoint_interval=%d",
             self.task_name,
             total,
-            batch_size,
-            num_batches,
             max_workers,
+            batch_size,
         )
 
         def _eval(args: tuple[int, dict[str, Any]]) -> SampleResult:
             idx, sample = args
             return self.evaluate_sample(client, sample, str(idx))
 
-        with tqdm(total=total, desc=self.task_name) as pbar:
-            for batch_idx in range(num_batches):
-                start = batch_idx * batch_size
-                end = min(start + batch_size, total)
-                batch = [
-                    (idx, dataset[idx]) for idx in range(start, end)
-                ]
+        completed = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_eval, (idx, sample)): idx
+                for idx, sample in enumerate(dataset)
+            }
+            with tqdm(total=total, desc=self.task_name) as pbar:
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                    except Exception:
+                        sample_idx = futures[future]
+                        logger.exception(
+                            "%s: sample %d raised an unexpected error",
+                            self.task_name,
+                            sample_idx,
+                        )
+                        result = SampleResult(
+                            task=self.task_name,
+                            sample_id=str(sample_idx),
+                            prompt="",
+                            raw_response="",
+                            parsed_answer=None,
+                            normalized_answer=None,
+                            ground_truth="",
+                            score=0.0,
+                            error_category="unhandled_error",
+                            latency_ms=0.0,
+                        )
+                    self.partial_results.append(result)
+                    pbar.update(1)
 
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {
-                        executor.submit(_eval, item): item[0]
-                        for item in batch
-                    }
-                    for future in as_completed(futures):
-                        try:
-                            result = future.result()
-                        except Exception:
-                            sample_idx = futures[future]
-                            logger.exception(
-                                "%s: sample %d raised an unexpected error",
-                                self.task_name,
-                                sample_idx,
-                            )
-                            result = SampleResult(
-                                task=self.task_name,
-                                sample_id=str(sample_idx),
-                                prompt="",
-                                raw_response="",
-                                parsed_answer=None,
-                                normalized_answer=None,
-                                ground_truth="",
-                                score=0.0,
-                                error_category="unhandled_error",
-                                latency_ms=0.0,
-                            )
-                        self.partial_results.append(result)
-                        pbar.update(1)
-
-                logger.debug(
-                    "%s: batch %d/%d complete (%d-%d)",
-                    self.task_name,
-                    batch_idx + 1,
-                    num_batches,
-                    start,
-                    end - 1,
-                )
+                    completed += 1
+                    if completed % batch_size == 0:
+                        logger.debug(
+                            "%s: checkpoint — %d/%d samples complete",
+                            self.task_name,
+                            completed,
+                            total,
+                        )
 
         # Sort by sample_id to maintain deterministic order
         self.partial_results.sort(key=lambda r: int(r.sample_id))
