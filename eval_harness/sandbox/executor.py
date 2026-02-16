@@ -1,4 +1,10 @@
-"""Sandboxed code execution with timeout, memory limits, and process cleanup."""
+"""Sandboxed code execution with timeout, memory limits, and process cleanup.
+
+Works on both macOS and Linux without adjustments:
+- Memory limits: resource.setrlimit (RLIMIT_AS on Linux, RLIMIT_DATA/RSS fallback on macOS)
+- Network isolation: sandbox-exec (macOS) or unshare -rn (Linux), auto-validated at init
+- Process cleanup: os.setsid + os.killpg (POSIX, both platforms)
+"""
 
 from __future__ import annotations
 
@@ -20,14 +26,38 @@ logger = logging.getLogger(__name__)
 _MACOS_SANDBOX_PROFILE = "(version 1)(allow default)(deny network*)"
 
 
-def _is_sandbox_exec_available() -> bool:
-    """Check if macOS sandbox-exec is available."""
-    return platform.system() == "Darwin" and shutil.which("sandbox-exec") is not None
+def _probe_sandbox_exec() -> bool:
+    """Validate that macOS sandbox-exec actually works (not just present)."""
+    if platform.system() != "Darwin" or shutil.which("sandbox-exec") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["sandbox-exec", "-p", _MACOS_SANDBOX_PROFILE, "/usr/bin/true"],
+            capture_output=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
-def _is_unshare_available() -> bool:
-    """Check if Linux unshare is available."""
-    return platform.system() == "Linux" and shutil.which("unshare") is not None
+def _probe_unshare() -> bool:
+    """Validate that Linux unshare -rn actually works.
+
+    The binary may exist but unprivileged user namespaces can be disabled
+    (kernel.unprivileged_userns_clone=0), so we probe with a real command.
+    """
+    if platform.system() != "Linux" or shutil.which("unshare") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["unshare", "-rn", "/bin/true"],
+            capture_output=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
 @dataclass
@@ -45,14 +75,17 @@ class ExecutionResult:
 def _set_limits(memory_limit_mb: int = 256) -> None:
     """Set resource limits for the child process (preexec_fn).
 
-    Called in the forked child before exec.
+    Called in the forked child before exec.  Works on both Linux and macOS.
     """
-    # Memory limit (in bytes)
     mem_bytes = memory_limit_mb * 1024 * 1024
-    try:
-        resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
-    except (ValueError, resource.error):
-        pass  # Some systems don't support RLIMIT_AS
+
+    # Memory limit — try RLIMIT_AS (Linux), fall back to RLIMIT_DATA (macOS)
+    for limit_type in (resource.RLIMIT_AS, resource.RLIMIT_DATA):
+        try:
+            resource.setrlimit(limit_type, (mem_bytes, mem_bytes))
+            break
+        except (ValueError, resource.error, AttributeError):
+            continue
 
     # CPU time limit (generous — timeout handles wall clock)
     try:
@@ -83,13 +116,15 @@ class SafeExecutor:
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.memory_limit_mb = memory_limit_mb
-        # Detect platform-specific network isolation method once
-        self._use_sandbox_exec = _is_sandbox_exec_available()
-        self._use_unshare = not self._use_sandbox_exec and _is_unshare_available()
+        # Probe platform-specific network isolation at init time
+        # (binary existence alone is not enough — e.g. unprivileged
+        #  user namespaces may be disabled on Linux)
+        self._use_sandbox_exec = _probe_sandbox_exec()
+        self._use_unshare = not self._use_sandbox_exec and _probe_unshare()
         if self._use_sandbox_exec:
-            logger.info("Network isolation: macOS sandbox-exec")
+            logger.info("Network isolation: macOS sandbox-exec (validated)")
         elif self._use_unshare:
-            logger.info("Network isolation: Linux unshare -rn")
+            logger.info("Network isolation: Linux unshare -rn (validated)")
         else:
             logger.warning(
                 "Network isolation: not available on this platform — "
