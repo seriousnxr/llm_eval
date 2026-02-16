@@ -97,6 +97,7 @@ goaly_final/
     temperature: 0.0
     max_tokens: 2048
     top_p: 1.0
+    stop: null              # Configurable stop sequences
     timeout_seconds: 30
 
   retry:
@@ -119,6 +120,7 @@ goaly_final/
 - `client.py`: `EvalClient` class
   - Async-capable HTTP client using `aiohttp` (or threaded with `requests`)
   - OpenAI-compatible request format: `POST /v1/chat/completions`
+  - Support all configurable parameters: `model`, `temperature`, `max_tokens`, `top_p`, `stop`
   - **Retry logic**: Exponential backoff with jitter for 429/503
     - Respect `Retry-After` header from 429 responses
     - Cap backoff at `max_delay` seconds
@@ -130,13 +132,17 @@ goaly_final/
 ### Phase 2: Task Framework & GPQA (Commits 3-4)
 
 **Commit 3: Base task abstraction & answer extraction utilities**
-- `tasks/base.py`: Abstract `BaseTask` class
+- `tasks/base.py`: Abstract `BaseTask` class (type hints throughout all modules)
   ```python
   class BaseTask(ABC):
+      @abstractmethod
       def load_dataset(self) -> list[dict]: ...
-      def format_prompt(self, sample: dict) -> list[dict]: ...
+      @abstractmethod
+      def format_prompt(self, sample: dict) -> list[dict[str, str]]: ...
+      @abstractmethod
       def extract_answer(self, response: str) -> str | None: ...
-      def score(self, predicted: str, ground_truth: str) -> float: ...
+      @abstractmethod
+      def score(self, predicted: str | None, ground_truth: str) -> float: ...
       def run(self, client: EvalClient) -> list[SampleResult]: ...
   ```
 - `utils/extraction.py`:
@@ -153,12 +159,27 @@ goaly_final/
 - `tasks/gpqa.py`:
   - Load dataset: `datasets.load_dataset("Idavidrein/gpqa", "gpqa_diamond")`
     - Fields: `Question`, `Correct Answer`, `Incorrect Answer 1/2/3`
-  - Prompt template (following OpenAI simple-evals):
+  - **Few-shot multiple-choice prompting** (as required by task.md):
+    - Include 2-3 demonstration examples before the target question
+    - Each example shows: question → step-by-step reasoning → "Answer: X"
+    - Few-shot examples drawn from non-diamond split to avoid data leakage
+  - Prompt template:
     ```
     Answer the following multiple choice question. The last line of your
     response should be of the following format: 'Answer: $LETTER' (without
     quotes) where LETTER is one of ABCD. Think step by step before answering.
 
+    [FEW-SHOT EXAMPLE 1]
+    Question: {example_question_1}
+    A) ... B) ... C) ... D) ...
+    Answer: {example_answer_1}
+
+    [FEW-SHOT EXAMPLE 2]
+    Question: {example_question_2}
+    A) ... B) ... C) ... D) ...
+    Answer: {example_answer_2}
+
+    Now answer this question:
     {Question}
 
     A) {choice_A}
@@ -178,21 +199,17 @@ goaly_final/
   - Load dataset: `datasets.load_dataset("lighteval/MATH", split="test")` → first 500
     - Or from `openai/prm800k` math_splits (MATH-500 IID variant)
     - Fields: `problem`, `solution`, `answer`, `level`, `type`
-  - Prompt template:
+  - Prompt template (with `\boxed{}` instruction as required by task.md):
     ```
-    Solve the following math problem step by step. The last line of your
-    response should be of the form Answer: $ANSWER (without quotes) where
-    $ANSWER is the answer to the problem.
+    Solve the following math problem step by step. Put your final answer
+    within \boxed{}.
 
     {problem}
-
-    Remember to put your answer on its own line after "Answer:".
     ```
-  - **Multi-strategy answer extraction** (ordered by reliability):
-    1. `\boxed{...}` extraction (handle nested braces)
-    2. `Answer:\s*(.+)` pattern
-    3. "the answer is" pattern
-    4. Last mathematical expression fallback
+  - **Multi-strategy answer extraction** (ordered by reliability, as specified in task.md):
+    1. `\boxed{...}` extraction (handle nested braces — primary strategy)
+    2. "the answer is" pattern matching
+    3. Last expression fallback
   - **Answer normalization pipeline**:
     - LaTeX command cleanup: `\frac{a}{b}` → `a/b`, `\text{}` removal
     - Fraction handling: convert to canonical form, compare `1/2 == 0.5`
@@ -216,14 +233,19 @@ goaly_final/
 **Commit 7: LiveCodeBench evaluator (~400 problems)**
 - `tasks/livecodebench.py`:
   - Load dataset: `load_dataset("livecodebench/code_generation_lite", version_tag="release_v1")`
+    - Full dataset: ~400 problems
+    - Easy-only subset: ~130 problems (acceptable fallback for faster runs)
     - Fields: `question_title`, `question_content`, `input_output` (JSON with `inputs`/`outputs`), `difficulty`
   - Prompt: Ask model to generate a complete Python program reading stdin, writing stdout
   - Send prompt to model, extract code from response (strip markdown fences if present)
   - For each test case in `input_output`:
-    - Execute code via `SafeExecutor` with stdin piped in
-    - Compare stdout to expected output (strip trailing whitespace)
+    - Read stdin input from test case
+    - Pipe to generated code via `SafeExecutor`
+    - Capture stdout output
+    - Compare against expected output (strip trailing whitespace)
+    - **Handle encoding issues**: binary vs text mode detection, UTF-8 with fallback
   - **pass@1**: 1 if ALL test cases pass, 0 otherwise
-  - Per-problem JSONL: `problem_id`, `generated_code`, `test_results[]`, `pass_at_1`, `execution_time_ms`, `error_category`
+  - Per-problem JSONL: `problem_id`, `generated_code`, `test_results[]` (array of pass/fail per test case), `pass_at_1`, `execution_time_ms`, `error_category`
   - Error categories: `timeout`, `runtime_error`, `wrong_answer`, `compilation_error`, `memory_limit`
 
 ### Phase 5: Orchestration & Reporting (Commit 8)
