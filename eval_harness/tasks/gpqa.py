@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import random
+import threading
 from typing import Any
 
 from datasets import load_dataset
 
+from eval_harness.client import EvalClient
 from eval_harness.config import EvalConfig
-from eval_harness.tasks.base import BaseTask
+from eval_harness.tasks.base import BaseTask, SampleResult
 from eval_harness.utils.extraction import extract_mcq_answer
 
 logger = logging.getLogger(__name__)
@@ -82,8 +85,10 @@ class GPQATask(BaseTask):
     def __init__(self, config: EvalConfig, seed: int = 42) -> None:
         super().__init__(config)
         self.seed = seed
-        self.rng = random.Random(seed)
         self._dataset: list[dict[str, Any]] | None = None
+        # Thread-safe storage for correct letters keyed by sample_id
+        self._correct_letters: dict[str, str] = {}
+        self._letters_lock = threading.Lock()
 
     def load_dataset(self) -> list[dict[str, Any]]:
         """Load GPQA Diamond split from HuggingFace."""
@@ -97,14 +102,21 @@ class GPQATask(BaseTask):
         return self._dataset
 
     def _permute_choices(
-        self, sample: dict[str, Any]
+        self, sample: dict[str, Any], sample_id: str
     ) -> tuple[dict[str, str], str]:
         """Randomly permute answer choices and return (choices_dict, correct_letter).
+
+        Uses a per-sample deterministic RNG seeded from the base seed and
+        sample_id, making the function thread-safe (no shared mutable state).
 
         Returns:
             choices_dict: {"A": text, "B": text, "C": text, "D": text}
             correct_letter: the letter (A-D) that maps to the correct answer
         """
+        # Deterministic per-sample seed: combine base seed with sample_id
+        sample_hash = int(hashlib.md5(sample_id.encode()).hexdigest(), 16)
+        rng = random.Random(self.seed ^ sample_hash)
+
         choices = [
             sample["Correct Answer"],
             sample["Incorrect Answer 1"],
@@ -112,7 +124,7 @@ class GPQATask(BaseTask):
             sample["Incorrect Answer 3"],
         ]
         perm = list(range(4))
-        self.rng.shuffle(perm)
+        rng.shuffle(perm)
         shuffled = [choices[i] for i in perm]
 
         correct_index = shuffled.index(sample["Correct Answer"])
@@ -126,18 +138,26 @@ class GPQATask(BaseTask):
         }
         return choices_dict, correct_letter
 
-    def format_prompt(self, sample: dict[str, Any]) -> list[dict[str, str]]:
-        """Format a GPQA sample as few-shot chat messages."""
+    def _format_prompt_with_id(
+        self, sample: dict[str, Any], sample_id: str
+    ) -> list[dict[str, str]]:
+        """Format a GPQA sample as few-shot chat messages.
+
+        Does NOT mutate the sample dict — stores correct letter via
+        thread-safe _correct_letters dict.
+        """
         # Build few-shot prefix
         few_shot_parts = []
         for ex in FEW_SHOT_EXAMPLES:
             few_shot_parts.append(_format_few_shot_example(ex))
         few_shot_text = "\n\n---\n\n".join(few_shot_parts)
 
-        # Build target question
-        choices_dict, correct_letter = self._permute_choices(sample)
-        # Store correct letter for later scoring
-        sample["_correct_letter"] = correct_letter
+        # Build target question with per-sample deterministic permutation
+        choices_dict, correct_letter = self._permute_choices(sample, sample_id)
+
+        # Store correct letter thread-safely (keyed by sample_id)
+        with self._letters_lock:
+            self._correct_letters[sample_id] = correct_letter
 
         question_text = sample["Question"]
         target = f"{question_text}\n\n"
@@ -161,6 +181,15 @@ class GPQATask(BaseTask):
             {"role": "user", "content": user_content},
         ]
 
+    def format_prompt(self, sample: dict[str, Any]) -> list[dict[str, str]]:
+        """Format a GPQA sample (delegates to _format_prompt_with_id).
+
+        Note: When called via evaluate_sample, _format_prompt_with_id is used
+        directly with the sample_id for thread-safe correct letter storage.
+        This method is kept for interface compliance.
+        """
+        return self._format_prompt_with_id(sample, "0")
+
     def extract_answer(self, response: str) -> str | None:
         """Extract answer letter from model response."""
         return extract_mcq_answer(response)
@@ -171,12 +200,59 @@ class GPQATask(BaseTask):
             return None
         return answer.upper()
 
-    def get_ground_truth(self, sample: dict[str, Any]) -> str:
-        """Return the correct answer letter."""
-        return sample.get("_correct_letter", "A")
+    def get_ground_truth(self, sample: dict[str, Any], sample_id: str = "0") -> str:
+        """Return the correct answer letter from thread-safe storage."""
+        with self._letters_lock:
+            return self._correct_letters.get(sample_id, "A")
 
     def score(self, predicted: str | None, ground_truth: str) -> float:
         """Score: 1.0 if predicted matches ground truth letter, else 0.0."""
         if predicted is None:
             return 0.0
         return 1.0 if predicted == ground_truth else 0.0
+
+    def evaluate_sample(
+        self, client: EvalClient, sample: dict[str, Any], sample_id: str
+    ) -> SampleResult:
+        """Override to use thread-safe prompt formatting with sample_id."""
+        messages = self._format_prompt_with_id(sample, sample_id)
+        prompt_text = messages[-1]["content"] if messages else ""
+
+        response = client.chat_completion(messages)
+
+        ground_truth = self.get_ground_truth(sample, sample_id)
+
+        if response.error_category != "none":
+            return SampleResult(
+                task=self.task_name,
+                sample_id=sample_id,
+                prompt=prompt_text,
+                raw_response=response.content,
+                parsed_answer=None,
+                normalized_answer=None,
+                ground_truth=ground_truth,
+                score=0.0,
+                error_category=response.error_category,
+                latency_ms=response.latency_ms,
+            )
+
+        parsed = self.extract_answer(response.content)
+        normalized = self.normalize_answer(parsed)
+        result_score = self.score(normalized, ground_truth)
+
+        error_cat = "none"
+        if parsed is None:
+            error_cat = "parse_failure"
+
+        return SampleResult(
+            task=self.task_name,
+            sample_id=sample_id,
+            prompt=prompt_text,
+            raw_response=response.content,
+            parsed_answer=parsed,
+            normalized_answer=normalized,
+            ground_truth=ground_truth,
+            score=result_score,
+            error_category=error_cat,
+            latency_ms=response.latency_ms,
+        )

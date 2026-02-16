@@ -41,8 +41,10 @@ def extract_mcq_answer(text: str) -> str | None:
         if last_line.upper() in "ABCD" and len(last_line) == 1:
             return last_line.upper()
 
-    # Last resort: find first standalone A-D letter
-    standalone = re.search(r"\b([A-D])\b", text)
+    # Last resort: find a standalone A-D letter in the last 3 lines only
+    # (avoids false positives from letters in reasoning text)
+    tail = "\n".join(lines[-3:]) if len(lines) >= 3 else text
+    standalone = re.search(r"\b([A-D])\b", tail)
     if standalone:
         return standalone.group(1).upper()
 

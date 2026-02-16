@@ -16,6 +16,19 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# macOS sandbox profile to deny all network access
+_MACOS_SANDBOX_PROFILE = "(version 1)(allow default)(deny network*)"
+
+
+def _is_sandbox_exec_available() -> bool:
+    """Check if macOS sandbox-exec is available."""
+    return platform.system() == "Darwin" and shutil.which("sandbox-exec") is not None
+
+
+def _is_unshare_available() -> bool:
+    """Check if Linux unshare is available."""
+    return platform.system() == "Linux" and shutil.which("unshare") is not None
+
 
 @dataclass
 class ExecutionResult:
@@ -57,6 +70,7 @@ class SafeExecutor:
     Safety features:
     - Per-execution timeout with hard kill
     - Memory limits via resource.setrlimit
+    - Network isolation (macOS sandbox-exec / Linux unshare -rn)
     - Process group kill to prevent process leaks
     - Temporary directory isolation per execution
     - Stdout/stderr capture
@@ -69,6 +83,18 @@ class SafeExecutor:
     ) -> None:
         self.timeout_seconds = timeout_seconds
         self.memory_limit_mb = memory_limit_mb
+        # Detect platform-specific network isolation method once
+        self._use_sandbox_exec = _is_sandbox_exec_available()
+        self._use_unshare = not self._use_sandbox_exec and _is_unshare_available()
+        if self._use_sandbox_exec:
+            logger.info("Network isolation: macOS sandbox-exec")
+        elif self._use_unshare:
+            logger.info("Network isolation: Linux unshare -rn")
+        else:
+            logger.warning(
+                "Network isolation: not available on this platform — "
+                "code will run without network restrictions"
+            )
 
     def execute(
         self,
@@ -99,8 +125,19 @@ class SafeExecutor:
             else:
                 stdin_bytes = stdin_input
 
+            # Build command with optional network isolation
+            base_cmd = ["python3", code_path]
+            if self._use_sandbox_exec:
+                cmd = [
+                    "sandbox-exec", "-p", _MACOS_SANDBOX_PROFILE,
+                ] + base_cmd
+            elif self._use_unshare:
+                cmd = ["unshare", "-rn"] + base_cmd
+            else:
+                cmd = base_cmd
+
             proc = subprocess.Popen(
-                ["python3", code_path],
+                cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

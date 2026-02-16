@@ -31,13 +31,18 @@ class _RequestThrottle:
         self._last_request_time = 0.0
 
     def wait(self) -> None:
-        """Block until it's safe to send the next request."""
+        """Block until it's safe to send the next request.
+
+        Calculates the required wait inside the lock, then sleeps *outside*
+        the lock so other threads can reserve their own slots concurrently.
+        """
         with self._lock:
             now = time.monotonic()
-            elapsed = now - self._last_request_time
-            if elapsed < self._min_interval:
-                time.sleep(self._min_interval - elapsed)
-            self._last_request_time = time.monotonic()
+            wait_time = max(0.0, self._min_interval - (now - self._last_request_time))
+            # Reserve our slot by advancing last_request_time
+            self._last_request_time = now + wait_time
+        if wait_time > 0:
+            time.sleep(wait_time)
 
 
 @dataclass

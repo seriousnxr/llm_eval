@@ -74,12 +74,13 @@ server:
   timeout_seconds: 30
 
 retry:
-  max_retries: 5
+  max_retries: 10
   base_delay: 1.0
   max_delay: 60.0
+  retry_status_codes: [429, 503]
 
 concurrency:
-  max_workers: 10
+  max_workers: 3
   batch_size: 50
 
 output:
@@ -131,7 +132,7 @@ LiveCodeBench additionally: `problem_id`, `generated_code`, `test_results`, `pas
 | Behavior | How We Handle It |
 |----------|-----------------|
 | Rate limiting (429) | Exponential backoff, respect `Retry-After` header |
-| Server errors (503) | Retry with backoff (up to 5 attempts) |
+| Server errors (503) | Retry with backoff (up to 10 attempts) |
 | Truncated JSON (200) | Detect JSON decode failure, auto-retry |
 | Slow chunked responses | Per-request timeout (30s default) |
 
@@ -139,5 +140,6 @@ LiveCodeBench additionally: `problem_id`, `generated_code`, `test_results`, `pas
 
 - **Timeout**: Hard 5s limit per test case with `SIGKILL` on process group
 - **Memory**: 256MB limit via `resource.setrlimit`
+- **Network**: Blocked via `sandbox-exec` (macOS) or `unshare -rn` (Linux)
 - **Isolation**: Temp directory per execution, minimal `PATH` env
 - **Cleanup**: Process group kill + temp dir removal in `finally` block

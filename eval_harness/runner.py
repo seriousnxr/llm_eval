@@ -119,6 +119,7 @@ class EvalRunner:
         logger.info("=" * 60)
 
         start_time = time.perf_counter()
+        task_wall_times: dict[str, float] = {}
 
         for task_name in self.requested_tasks:
             if self._interrupted:
@@ -133,6 +134,7 @@ class EvalRunner:
                 self.results[task_name] = task_results
 
                 task_elapsed = time.perf_counter() - task_start
+                task_wall_times[task_name] = task_elapsed
                 correct = sum(1 for r in task_results if r.score > 0)
                 total = len(task_results)
                 accuracy = correct / total if total > 0 else 0.0
@@ -155,7 +157,7 @@ class EvalRunner:
         self._save_results()
 
         # Generate summary report
-        report = build_summary_report(self.results, wall_clock)
+        report = build_summary_report(self.results, wall_clock, task_wall_times)
         write_summary_report(report, results_dir / "summary_report.json")
 
         logger.info("=" * 60)

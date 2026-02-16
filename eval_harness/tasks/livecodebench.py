@@ -122,15 +122,6 @@ def _get_test_inputs_outputs(sample: dict[str, Any]) -> tuple[list[str], list[st
     return inputs, outputs, fn_name
 
 
-def _build_stdin_test_code(code: str, stdin_input: str) -> str:
-    """Build a test script that runs the solution code with stdin input.
-
-    For stdin-based problems, the generated code reads from stdin and
-    writes to stdout. We just run it directly.
-    """
-    return code
-
-
 def _build_functional_test_code(
     code: str, fn_name: str, test_input: str, expected_output: str
 ) -> str:

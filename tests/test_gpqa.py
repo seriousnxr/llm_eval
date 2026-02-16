@@ -26,8 +26,8 @@ class TestGPQAPermutation:
             "Incorrect Answer 3": "6",
         }
 
-        choices1, letter1 = task1._permute_choices(sample)
-        choices2, letter2 = task2._permute_choices(sample)
+        choices1, letter1 = task1._permute_choices(sample, "0")
+        choices2, letter2 = task2._permute_choices(sample, "0")
 
         assert choices1 == choices2
         assert letter1 == letter2
@@ -47,7 +47,7 @@ class TestGPQAPermutation:
             "Incorrect Answer 3": "WRONG3",
         }
 
-        choices, correct_letter = task._permute_choices(sample)
+        choices, correct_letter = task._permute_choices(sample, "0")
         assert choices[correct_letter] == "CORRECT"
 
     def test_all_choices_present(self):
@@ -65,6 +65,6 @@ class TestGPQAPermutation:
             "Incorrect Answer 3": "D_ans",
         }
 
-        choices, _ = task._permute_choices(sample)
+        choices, _ = task._permute_choices(sample, "0")
         values = set(choices.values())
         assert values == {"A_ans", "B_ans", "C_ans", "D_ans"}

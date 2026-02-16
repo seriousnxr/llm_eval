@@ -10,6 +10,7 @@ from datasets import load_dataset
 from eval_harness.config import EvalConfig
 from eval_harness.tasks.base import BaseTask, SampleResult
 from eval_harness.utils.extraction import (
+    extract_boxed_answer,
     extract_math_answer,
     normalize_math_answer,
 )
@@ -76,8 +77,6 @@ class Math500Task(BaseTask):
         """Extract ground truth from the solution field."""
         solution = sample.get("solution", "")
         # MATH dataset has the answer in \boxed{} within the solution
-        from eval_harness.utils.extraction import extract_boxed_answer
-
         boxed = extract_boxed_answer(solution)
         if boxed is not None:
             return boxed

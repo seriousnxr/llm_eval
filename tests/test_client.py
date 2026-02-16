@@ -21,7 +21,10 @@ def config():
 
 @pytest.fixture
 def client(config):
-    return EvalClient(config)
+    c = EvalClient(config)
+    # Disable throttle delay for fast tests
+    c._throttle._min_interval = 0.0
+    return c
 
 
 class TestRetryLogic:

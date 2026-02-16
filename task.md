@@ -232,7 +232,7 @@ DATASETS
 
 • MATH500:
   https://huggingface.co/datasets/lighteval/MATH (first 500 problems)
-
+  https://huggingface.co/datasets/math-ai/math500
 • LiveCodeBench:
   https://huggingface.co/datasets/livecodebench/code_generation_lite
 

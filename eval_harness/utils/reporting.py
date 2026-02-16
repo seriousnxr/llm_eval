@@ -16,16 +16,21 @@ logger = logging.getLogger(__name__)
 def build_summary_report(
     results_by_task: dict[str, list[SampleResult]],
     wall_clock_seconds: float,
+    task_wall_times: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Build a summary report from evaluation results.
 
     Args:
         results_by_task: Mapping of task name → list of SampleResult.
         wall_clock_seconds: Total wall-clock time for the evaluation run.
+        task_wall_times: Optional per-task wall-clock seconds for accurate
+            per-task throughput calculation.
 
     Returns:
         Summary report dict ready for JSON serialization.
     """
+    if task_wall_times is None:
+        task_wall_times = {}
     report: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "wall_clock_seconds": round(wall_clock_seconds, 2),
@@ -53,9 +58,9 @@ def build_summary_report(
         p95_idx = int(len(latencies) * 0.95) if latencies else 0
         p95 = sorted(latencies)[min(p95_idx, len(latencies) - 1)] if latencies else 0.0
 
-        # Throughput
-        total_latency_s = sum(latencies) / 1000.0
-        throughput = n / wall_clock_seconds if wall_clock_seconds > 0 else 0.0
+        # Throughput (use per-task wall time if available, else total)
+        task_seconds = task_wall_times.get(task_name, wall_clock_seconds)
+        throughput = n / task_seconds if task_seconds > 0 else 0.0
 
         task_report = {
             "total_samples": n,
