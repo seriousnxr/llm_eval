@@ -1,26 +1,44 @@
 {
-  "timestamp": "2026-02-16T22:16:51.709283+00:00",
-  "wall_clock_seconds": 16.05,
+  "timestamp": "2026-02-16T22:35:03.691619+00:00",
+  "wall_clock_seconds": 149.14,
   "tasks": {
-    "math500": {
-      "total_samples": 10,
-      "correct": 9,
-      "accuracy": 0.9,
+    "livecodebench": {
+      "total_samples": 25,
+      "correct": 7,
+      "accuracy": 0.28,
       "error_breakdown": {
-        "none": 10
+        "none": 7,
+        "compilation_error": 8,
+        "runtime_error": 9,
+        "wrong_answer": 1
       },
       "latency_ms": {
-        "mean": 22.4,
-        "p50": 17.8,
-        "p95": 74.5
+        "mean": 15539.1,
+        "p50": 12574.9,
+        "p95": 24981.5
       },
-      "throughput_rps": 0.62
+      "throughput_rps": 0.17,
+      "pass_at_1": 0.28,
+      "by_difficulty": {
+        "easy": {
+          "total": 10,
+          "passed": 3
+        },
+        "medium": {
+          "total": 10,
+          "passed": 2
+        },
+        "hard": {
+          "total": 5,
+          "passed": 2
+        }
+      }
     }
   },
   "overall": {
-    "total_samples": 10,
-    "total_correct": 9,
-    "overall_accuracy": 0.9,
-    "throughput_rps": 0.62
+    "total_samples": 25,
+    "total_correct": 7,
+    "overall_accuracy": 0.28,
+    "throughput_rps": 0.17
   }
 }

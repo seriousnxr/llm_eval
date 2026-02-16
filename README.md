@@ -7,9 +7,12 @@ A lightweight, extensible evaluation system for benchmarking LLMs against GPQA D
 - **GPQA Diamond** (198 questions) — Few-shot multiple-choice prompting with randomized answer permutation
 - **MATH500** (500 problems) — Multi-strategy answer extraction with `\boxed{}` prompting
 - **LiveCodeBench** (~400 problems) — Sandboxed code execution with timeout/memory limits
-- **Robust API client** — Retry with exponential backoff for 429/503, truncated JSON detection, per-request timeouts
-- **Structured reporting** — Per-sample JSONL output and JSON summary report
+- **Robust API client** — Retry with exponential backoff for 429/503, truncated JSON detection, per-request timeouts, request throttle (40 req/min)
+- **Batched execution** — Samples dispatched in configurable `batch_size` chunks with per-batch disk checkpointing (progress survives crashes)
+- **Graceful interruption** — Ctrl+C saves partial results, generates summary report, and exits cleanly
+- **Structured reporting** — Per-sample JSONL output and JSON summary report with accuracy, error breakdown, wall-clock timing, and throughput
 - **Configurable** — YAML-based configuration for server, retry, concurrency, and output settings
+- **Cross-platform** — Works on macOS and Linux without adjustments (probe-based sandbox validation)
 
 ## Quick Start
 
@@ -95,12 +98,12 @@ eval_harness/
 ├── config.py          # Configuration loading (YAML → dataclasses)
 ├── runner.py          # Orchestrator with graceful interruption
 ├── tasks/
-│   ├── base.py        # Abstract base task (ThreadPoolExecutor)
+│   ├── base.py        # Abstract base task (batched ThreadPoolExecutor)
 │   ├── gpqa.py        # GPQA Diamond (few-shot MCQ)
 │   ├── math500.py     # MATH500 (multi-strategy extraction)
 │   └── livecodebench.py  # LiveCodeBench (sandboxed execution)
 ├── sandbox/
-│   └── executor.py    # Safe subprocess with timeout/memory limits
+│   └── executor.py    # Safe subprocess with timeout/memory/network isolation
 └── utils/
     ├── extraction.py  # Answer extraction & normalization
     ├── logging.py     # Structured logging & JSONL writer
@@ -139,7 +142,15 @@ LiveCodeBench additionally: `problem_id`, `generated_code`, `test_results`, `pas
 ## Sandbox Safety (LiveCodeBench)
 
 - **Timeout**: Hard 5s limit per test case with `SIGKILL` on process group
-- **Memory**: 256MB limit via `resource.setrlimit`
-- **Network**: Blocked via `sandbox-exec` (macOS) or `unshare -rn` (Linux)
+- **Memory**: 256MB limit via `resource.setrlimit` (RLIMIT_AS on Linux, RLIMIT_DATA fallback on macOS)
+- **Network**: Blocked via `sandbox-exec` (macOS) or `unshare -rn` (Linux), probe-validated at init
 - **Isolation**: Temp directory per execution, minimal `PATH` env
 - **Cleanup**: Process group kill + temp dir removal in `finally` block
+
+## Batching & Checkpointing
+
+Samples are processed in chunks of `batch_size` (default: 50):
+- At most `batch_size` futures alive at once → bounded memory
+- After each batch, results are flushed to disk (JSONL) → progress survives crashes
+- A shared `ThreadPoolExecutor` is reused across batches → no straggler stall
+- On Ctrl+C: pending futures are cancelled, partial results + summary report are saved

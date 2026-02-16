@@ -101,13 +101,13 @@ goaly_final/
     timeout_seconds: 30
 
   retry:
-    max_retries: 5
+    max_retries: 10
     base_delay: 1.0
     max_delay: 60.0
     retry_status_codes: [429, 503]
 
   concurrency:
-    max_workers: 10
+    max_workers: 3
     batch_size: 50
 
   output:
@@ -118,8 +118,9 @@ goaly_final/
 
 **Commit 2: API client with robust error handling**
 - `client.py`: `EvalClient` class
-  - Async-capable HTTP client using `aiohttp` (or threaded with `requests`)
+  - Synchronous HTTP client using `requests` (concurrency via `ThreadPoolExecutor`)
   - OpenAI-compatible request format: `POST /v1/chat/completions`
+  - Request throttle: 40 req/min with lock-free sleep-outside-lock design
   - Support all configurable parameters: `model`, `temperature`, `max_tokens`, `top_p`, `stop`
   - **Retry logic**: Exponential backoff with jitter for 429/503
     - Respect `Retry-After` header from 429 responses
@@ -232,7 +233,7 @@ goaly_final/
 
 **Commit 7: LiveCodeBench evaluator (~400 problems)**
 - `tasks/livecodebench.py`:
-  - Load dataset: `load_dataset("livecodebench/code_generation_lite", version_tag="release_v1")`
+  - Load dataset: `hf_hub_download("livecodebench/code_generation_lite", "test.jsonl")` (release_v1)
     - Full dataset: ~400 problems
     - Easy-only subset: ~130 problems (acceptable fallback for faster runs)
     - Fields: `question_title`, `question_content`, `input_output` (JSON with `inputs`/`outputs`), `difficulty`
@@ -255,8 +256,15 @@ goaly_final/
   - Load config from YAML
   - Run each benchmark with configurable worker pool
   - **Concurrent requests**: `ThreadPoolExecutor` with `max_workers` from config
-  - **Rate-limit aware scheduling**: Track 429 responses, dynamically throttle
-  - **Graceful interruption**: `signal.signal(SIGINT, ...)` handler that saves partial results
+  - **Batched execution**: Samples dispatched in chunks of `batch_size`; each batch
+    submits to a shared executor, waits for completion, then flushes results to disk
+    via `on_batch_complete` callback — bounds memory and provides crash-safe checkpoints
+  - **Rate-limit aware scheduling**: Built-in `_RequestThrottle` at 40 req/min
+  - **Graceful interruption**: `signal.signal(SIGINT, ...)` handler that:
+    1. Cancels pending futures via `executor.shutdown(wait=False, cancel_futures=True)`
+    2. Captures partial results from the in-flight task
+    3. Saves per-sample JSONL files
+    4. Generates `summary_report.json` with accuracy, error breakdown, wall-clock, throughput
   - Progress bar via `tqdm`
 - `utils/reporting.py`:
   - Write per-sample JSONL with all required fields
@@ -302,12 +310,12 @@ LiveCodeBench additionally includes: `generated_code`, `test_results`, `pass_at_
 ## Dependencies
 
 ```
-aiohttp>=3.9           # Async HTTP client
-datasets>=2.14         # HuggingFace datasets loading
+requests>=2.31         # HTTP client (sync + ThreadPoolExecutor)
+datasets>=2.14         # HuggingFace datasets loading (GPQA, MATH500)
+huggingface_hub>=0.20  # Direct file download (LiveCodeBench JSONL)
 pyyaml>=6.0            # Config file parsing
 tqdm>=4.65             # Progress bars
-numpy>=1.24            # Metrics computation
-pandas>=2.0            # Data manipulation
+numpy>=1.24            # Answer normalization (fractions)
 pytest>=7.0            # Testing
 ```
 
@@ -330,11 +338,13 @@ pytest>=7.0            # Testing
 
 ## Key Design Decisions
 
-1. **Sync + ThreadPool over full async**: Simpler to implement and debug; `ThreadPoolExecutor` gives adequate concurrency for I/O-bound API calls against a single local server. Rate-limiting at 50 req/min means massive concurrency isn't needed.
+1. **Sync + ThreadPool over full async**: Simpler to implement and debug; `ThreadPoolExecutor` gives adequate concurrency for I/O-bound API calls against a single local server. Rate-limiting at 40 req/min means massive concurrency isn't needed.
+
+1b. **Batched dispatch with shared executor**: Samples are submitted in `batch_size` chunks to a single `ThreadPoolExecutor`. This bounds memory (at most `batch_size` futures alive), provides backpressure against slow servers, and enables per-batch disk checkpointing so progress survives crashes. The executor is shared across batches so workers are never idle at batch boundaries.
 
 2. **Cascading regex extraction over LLM-based judging**: The mock server returns random answers, so we don't have a second LLM to use as an equality judge. We rely purely on deterministic extraction + normalization.
 
-3. **subprocess.Process + os.killpg for sandboxing**: Following LiveCodeBench's pattern, use process-level isolation with hard kill on timeout. More reliable than threading for untrusted code.
+3. **subprocess.Popen + os.killpg for sandboxing**: Following LiveCodeBench's pattern, use process-level isolation with hard kill on timeout. More reliable than threading for untrusted code. Network isolation uses probe-based validation at init (`_probe_sandbox_exec` on macOS, `_probe_unshare` on Linux) — binary existence alone is not enough, as unprivileged user namespaces may be disabled.
 
 4. **Answer permutation for GPQA**: Following OpenAI simple-evals, randomize answer order per question with a seeded RNG for reproducibility. This prevents position bias.
 
