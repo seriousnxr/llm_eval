@@ -144,31 +144,76 @@ def normalize_math_answer(answer: str | None) -> str | None:
     """Normalize a math answer for comparison.
 
     Handles:
-    - LaTeX cleanup (\\frac, \\text, dollar signs)
+    - LaTeX cleanup (\\frac, \\dfrac, \\text, \\mbox, dollar signs, units)
     - Fraction normalization
     - Trailing zeros
-    - Whitespace
+    - Whitespace and cosmetic LaTeX
     """
     if answer is None:
         return None
 
     s = answer.strip()
 
-    # Remove dollar signs
+    # Remove dollar signs (including escaped \$)
+    s = s.replace("\\$", "")
     s = s.replace("$", "")
 
-    # Remove \text{...}
+    # Remove \text{...}, \textbf{...}, \mathrm{...}, \mbox{...}
     s = re.sub(r"\\text\{([^}]*)\}", r"\1", s)
     s = re.sub(r"\\textbf\{([^}]*)\}", r"\1", s)
     s = re.sub(r"\\mathrm\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\mbox\{([^}]*)\}", r"\1", s)
 
-    # Convert \frac{a}{b} → a/b
-    s = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", r"\1/\2", s)
+    # Remove trailing unit words/symbols that follow the numeric answer
+    # e.g. "864 inches^2", "5.4 cents", "90 degrees"
+    s = re.sub(
+        r"\s*(?:inches|feet|meters|centimeters|cents|degrees|cm|mm|m|kg|lbs?)\^?\d*\s*$",
+        "", s, flags=re.IGNORECASE,
+    )
 
-    # Remove remaining common LaTeX commands
+    # Convert \dfrac{a}{b} and \frac{a}{b} → a/b
+    s = re.sub(r"\\d?frac\{([^}]+)\}\{([^}]+)\}", r"\1/\2", s)
+    # Handle shorthand \frac12 or \frac{1}2 or \frac1{2} (no braces)
+    s = re.sub(r"\\d?frac\{([^}]+)\}(\d)", r"\1/\2", s)
+    s = re.sub(r"\\d?frac(\d)\{([^}]+)\}", r"\1/\2", s)
+    s = re.sub(r"\\d?frac(\d)(\d)", r"\1/\2", s)
+
+    # Remove \left, \right delimiters
     s = s.replace("\\left", "").replace("\\right", "")
+
+    # Remove LaTeX spacing commands
     s = s.replace("\\,", "").replace("\\;", "").replace("\\ ", "")
+    s = s.replace("\\!", "").replace("\\:", "")
+
+    # Remove ^\circ (degree symbol)
+    s = re.sub(r"\^\\circ", "", s)
+    s = re.sub(r"°", "", s)
+
+    # Normalize \sqrt{x} — remove optional braces around single char:
+    # \sqrt{2} and \sqrt2 should match
+    s = re.sub(r"\\sqrt\{(\w)\}", r"\\sqrt\1", s)
+
+    # Normalize subscripts: _{5} → _5
+    s = re.sub(r"_\{(\w+)\}", r"_\1", s)
+
+    # Remove LaTeX thousands separators: ,\! or just \!
+    s = s.replace(",\\!", "")
+
+    # Remove plain commas used as thousands separators in numbers
+    # e.g. "10,080" → "10080", but don't remove commas in tuples like "(1,2)"
+    s = re.sub(r"(\d),(\d{3})\b", r"\1\2", s)
+    # Repeat for numbers with multiple groups like "1,000,000"
+    s = re.sub(r"(\d),(\d{3})\b", r"\1\2", s)
+
+    # \cdot and \times → *
     s = re.sub(r"\\(?:cdot|times)", "*", s)
+
+    # Remove remaining cosmetic LaTeX commands we don't need
+    s = re.sub(r"\\(?:displaystyle|phantom|hspace|vspace)\{[^}]*\}", "", s)
+
+    # Collapse all internal whitespace to nothing for structural comparison
+    # but keep content readable — strip spaces around operators/commas
+    s = re.sub(r"\s+", "", s)
 
     # Remove leading/trailing whitespace and periods
     s = s.strip().rstrip(".")
