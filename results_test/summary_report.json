@@ -1,0 +1,26 @@
+{
+  "timestamp": "2026-02-16T22:16:51.709283+00:00",
+  "wall_clock_seconds": 16.05,
+  "tasks": {
+    "math500": {
+      "total_samples": 10,
+      "correct": 9,
+      "accuracy": 0.9,
+      "error_breakdown": {
+        "none": 10
+      },
+      "latency_ms": {
+        "mean": 22.4,
+        "p50": 17.8,
+        "p95": 74.5
+      },
+      "throughput_rps": 0.62
+    }
+  },
+  "overall": {
+    "total_samples": 10,
+    "total_correct": 9,
+    "overall_accuracy": 0.9,
+    "throughput_rps": 0.62
+  }
+}

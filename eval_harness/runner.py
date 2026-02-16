@@ -32,7 +32,7 @@ class EvalRunner:
 
     Features:
     - Runs selected tasks against the model server
-    - Saves per-sample JSONL results
+    - Saves per-sample JSONL results with per-batch checkpointing
     - Generates summary report
     - Graceful interruption with partial result saving
     """
@@ -138,6 +138,24 @@ class EvalRunner:
             ]
             write_jsonl(error_records, results_dir / "error_log.jsonl")
 
+    def _on_batch_complete(
+        self,
+        task_name: str,
+        partial_results: list[SampleResult],
+        batch_end_idx: int,
+    ) -> None:
+        """Checkpoint callback — flush partial results to disk after each batch."""
+        self.results[task_name] = list(partial_results)
+        results_dir = self.config.ensure_output_dir()
+        records = results_to_jsonl_records(partial_results)
+        write_jsonl(records, results_dir / f"{task_name}_results.jsonl")
+        logger.info(
+            "%s: checkpoint saved — %d results written to disk (through sample %d)",
+            task_name,
+            len(partial_results),
+            batch_end_idx - 1,
+        )
+
     def run(self) -> dict[str, Any]:
         """Run all requested tasks and return the summary report.
 
@@ -168,7 +186,7 @@ class EvalRunner:
             try:
                 task = self._build_task(task_name)
                 self._current_task = task
-                task_results = task.run(self.client)
+                task_results = task.run(self.client, on_batch_complete=self._on_batch_complete)
                 self._current_task = None
                 self.results[task_name] = task_results
 

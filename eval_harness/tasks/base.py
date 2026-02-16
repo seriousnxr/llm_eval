@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from tqdm import tqdm
 
@@ -31,6 +31,10 @@ class SampleResult:
     error_category: str
     latency_ms: float
     extra: dict[str, Any] = field(default_factory=dict)
+
+
+# Type alias for the optional per-batch checkpoint callback.
+BatchCheckpointCallback = Callable[[str, list[SampleResult], int], None]
 
 
 class BaseTask(ABC):
@@ -122,82 +126,128 @@ class BaseTask(ABC):
             latency_ms=response.latency_ms,
         )
 
-    def run(self, client: EvalClient) -> list[SampleResult]:
-        """Run the full evaluation with a single thread-pool.
+    # ------------------------------------------------------------------
+    # Batch helpers
+    # ------------------------------------------------------------------
 
-        All samples are submitted to one ``ThreadPoolExecutor`` whose
-        ``max_workers`` caps concurrency.  Workers are never idle between
-        batches because there are no batch boundaries — as soon as one
-        sample completes, the executor immediately starts the next queued
-        sample.
+    @staticmethod
+    def _collect_result(
+        future: Future[SampleResult],
+        future_to_idx: dict[Future[SampleResult], int],
+        task_name: str,
+    ) -> SampleResult:
+        """Resolve a future into a SampleResult, handling exceptions."""
+        try:
+            return future.result()
+        except Exception:
+            sample_idx = future_to_idx[future]
+            logger.exception(
+                "%s: sample %d raised an unexpected error",
+                task_name,
+                sample_idx,
+            )
+            return SampleResult(
+                task=task_name,
+                sample_id=str(sample_idx),
+                prompt="",
+                raw_response="",
+                parsed_answer=None,
+                normalized_answer=None,
+                ground_truth="",
+                score=0.0,
+                error_category="unhandled_error",
+                latency_ms=0.0,
+            )
 
-        ``batch_size`` is used only for periodic checkpoint logging so the
-        operator can see progress at a coarser grain than per-sample.
+    def run(
+        self,
+        client: EvalClient,
+        on_batch_complete: BatchCheckpointCallback | None = None,
+    ) -> list[SampleResult]:
+        """Run the full evaluation, processing samples in batches.
 
-        Each sample results in exactly one ``/v1/chat/completions`` call
-        (the standard OpenAI endpoint does not support multi-prompt
-        requests).
+        Samples are dispatched in chunks of ``batch_size``.  Each batch
+        submits its samples to a shared ``ThreadPoolExecutor`` (capped at
+        ``max_workers``) and waits only for that batch to finish before
+        moving to the next.  This gives us:
+
+        * **Bounded memory** — at most ``batch_size`` futures + results
+          are alive at once.
+        * **Periodic checkpointing** — the caller can supply an
+          ``on_batch_complete`` callback that is invoked after every batch
+          with ``(task_name, partial_results, batch_end_idx)`` so it can
+          flush results to disk.
+        * **Backpressure** — if the server is slow we don't queue
+          hundreds of pending HTTP requests.
+        * **No straggler stall** — within each batch the executor keeps
+          all ``max_workers`` threads busy via ``as_completed``.
+
+        Each sample still results in exactly one
+        ``/v1/chat/completions`` call.
+
+        Args:
+            client: The API client used to send requests.
+            on_batch_complete: Optional callback invoked after each batch.
+                Signature: ``(task_name, partial_results, batch_end_idx)``.
         """
         dataset = self.load_dataset()
         total = len(dataset)
-        # Reset for this run; accessible to the runner's interrupt handler.
         self.partial_results = []
 
         max_workers = self.config.concurrency.max_workers
         batch_size = self.config.concurrency.batch_size
+        num_batches = (total + batch_size - 1) // batch_size
 
         logger.info(
-            "%s: %d samples, max_workers=%d, checkpoint_interval=%d",
+            "%s: %d samples, batch_size=%d (%d batches), max_workers=%d",
             self.task_name,
             total,
-            max_workers,
             batch_size,
+            num_batches,
+            max_workers,
         )
 
         def _eval(args: tuple[int, dict[str, Any]]) -> SampleResult:
             idx, sample = args
             return self.evaluate_sample(client, sample, str(idx))
 
-        completed = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            self._executor = executor
-            futures = {
-                executor.submit(_eval, (idx, sample)): idx
-                for idx, sample in enumerate(dataset)
-            }
-            with tqdm(total=total, desc=self.task_name) as pbar:
-                for future in as_completed(futures):
-                    try:
-                        result = future.result()
-                    except Exception:
-                        sample_idx = futures[future]
-                        logger.exception(
-                            "%s: sample %d raised an unexpected error",
-                            self.task_name,
-                            sample_idx,
-                        )
-                        result = SampleResult(
-                            task=self.task_name,
-                            sample_id=str(sample_idx),
-                            prompt="",
-                            raw_response="",
-                            parsed_answer=None,
-                            normalized_answer=None,
-                            ground_truth="",
-                            score=0.0,
-                            error_category="unhandled_error",
-                            latency_ms=0.0,
-                        )
-                    self.partial_results.append(result)
-                    pbar.update(1)
+        with tqdm(total=total, desc=self.task_name) as pbar:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                self._executor = executor
 
-                    completed += 1
-                    if completed % batch_size == 0:
-                        logger.debug(
-                            "%s: checkpoint — %d/%d samples complete",
+                for batch_idx in range(num_batches):
+                    start = batch_idx * batch_size
+                    end = min(start + batch_size, total)
+
+                    # Submit only this batch's samples
+                    future_to_idx: dict[Future[SampleResult], int] = {
+                        executor.submit(_eval, (idx, dataset[idx])): idx
+                        for idx in range(start, end)
+                    }
+
+                    # Collect results as they complete
+                    for future in as_completed(future_to_idx):
+                        result = self._collect_result(
+                            future, future_to_idx, self.task_name
+                        )
+                        self.partial_results.append(result)
+                        pbar.update(1)
+
+                    logger.debug(
+                        "%s: batch %d/%d done (%d-%d)",
+                        self.task_name,
+                        batch_idx + 1,
+                        num_batches,
+                        start,
+                        end - 1,
+                    )
+
+                    # Checkpoint callback — lets the runner save to disk
+                    if on_batch_complete is not None:
+                        on_batch_complete(
                             self.task_name,
-                            completed,
-                            total,
+                            self.partial_results,
+                            end,
                         )
 
         self._executor = None
