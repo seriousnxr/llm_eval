@@ -11,7 +11,7 @@ import zlib
 from dataclasses import dataclass
 from typing import Any
 
-from datasets import load_dataset
+from huggingface_hub import hf_hub_download
 
 from eval_harness.client import EvalClient
 from eval_harness.config import EvalConfig
@@ -187,14 +187,27 @@ class LiveCodeBenchTask(BaseTask):
         if self._dataset is not None:
             return self._dataset
 
-        logger.info("Loading LiveCodeBench dataset (release_v1)...")
-        ds = load_dataset(
+        # The dataset uses a custom loading script that is no longer supported
+        # by recent versions of the `datasets` library. Download the JSONL file
+        # directly from the Hub instead.
+        _VERSION_TO_FILE = {
+            "release_v1": "test.jsonl",
+            "release_v2": "test2.jsonl",
+            "release_v3": "test3.jsonl",
+            "release_v4": "test4.jsonl",
+            "release_v5": "test5.jsonl",
+            "release_v6": "test6.jsonl",
+        }
+        data_file = _VERSION_TO_FILE.get("release_v1", "test.jsonl")
+        logger.info("Loading LiveCodeBench dataset (release_v1) from %s...", data_file)
+
+        path = hf_hub_download(
             "livecodebench/code_generation_lite",
-            split="test",
-            version_tag="release_v1",
-            trust_remote_code=True,
+            data_file,
+            repo_type="dataset",
         )
-        samples = [dict(row) for row in ds]
+        with open(path) as f:
+            samples = [json.loads(line) for line in f]
 
         if self.easy_only:
             samples = [

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,6 +16,28 @@ import requests
 from eval_harness.config import EvalConfig
 
 logger = logging.getLogger(__name__)
+
+
+class _RequestThrottle:
+    """Thread-safe request throttle to avoid overwhelming rate limits.
+
+    Ensures a minimum interval between requests across all threads,
+    preventing the thundering-herd problem when multiple workers retry.
+    """
+
+    def __init__(self, max_per_minute: int = 40) -> None:
+        self._min_interval = 60.0 / max_per_minute
+        self._lock = threading.Lock()
+        self._last_request_time = 0.0
+
+    def wait(self) -> None:
+        """Block until it's safe to send the next request."""
+        with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_request_time
+            if elapsed < self._min_interval:
+                time.sleep(self._min_interval - elapsed)
+            self._last_request_time = time.monotonic()
 
 
 @dataclass
@@ -56,6 +79,7 @@ class EvalClient:
         self.retry = config.retry
         self.session = requests.Session()
         self.error_log: list[ErrorRecord] = []
+        self._throttle = _RequestThrottle(max_per_minute=40)
 
     @property
     def endpoint(self) -> str:
@@ -135,6 +159,7 @@ class EvalClient:
         last_error_category = "api_error"
 
         for attempt in range(self.retry.max_retries + 1):
+            self._throttle.wait()  # Rate-limit outgoing requests
             start = time.perf_counter()
             try:
                 resp = self.session.post(
@@ -155,6 +180,16 @@ class EvalClient:
                         try:
                             retry_after = float(resp.headers["Retry-After"])
                         except ValueError:
+                            pass
+                    # If the server tells us when the rate-limit window resets,
+                    # use that to calculate a more accurate wait time.
+                    if resp.status_code == 429 and "X-RateLimit-Reset" in resp.headers:
+                        try:
+                            reset_ts = int(resp.headers["X-RateLimit-Reset"])
+                            wait_until_reset = max(0, reset_ts - int(time.time())) + 1
+                            if retry_after is None or wait_until_reset > retry_after:
+                                retry_after = min(wait_until_reset, self.retry.max_delay)
+                        except (ValueError, TypeError):
                             pass
                     self._log_error(
                         error_type,
@@ -193,7 +228,11 @@ class EvalClient:
                 try:
                     data = resp.json()
                 except json.JSONDecodeError:
-                    # Truncated JSON — retry
+                    # Truncated JSON — retry sparingly.
+                    # The server truncates deterministically (MD5-based),
+                    # so the same prompt will *always* get truncated.
+                    # Limit to 2 retries to avoid wasting time.
+                    _TRUNCATED_MAX_RETRIES = 2
                     last_error_category = "truncated_json"
                     self._log_error(
                         "truncated_json",
@@ -202,7 +241,7 @@ class EvalClient:
                         attempt,
                         prompt_preview,
                     )
-                    if attempt < self.retry.max_retries:
+                    if attempt < min(_TRUNCATED_MAX_RETRIES, self.retry.max_retries):
                         time.sleep(self._backoff_delay(attempt))
                         continue
                     return ClientResponse(

@@ -1,0 +1,54 @@
+{
+  "timestamp": "2026-02-16T20:16:29.933390+00:00",
+  "tasks": {
+    "gpqa": {
+      "total_samples": 198,
+      "correct": 53,
+      "accuracy": 0.2677,
+      "error_breakdown": {
+        "none": 194,
+        "truncated_json": 4
+      },
+      "latency_ms": {
+        "mean": 2369.6,
+        "p50": 4.4,
+        "p95": 11327.9
+      }
+    },
+    "math500": {
+      "total_samples": 500,
+      "correct": 1,
+      "accuracy": 0.002,
+      "error_breakdown": {
+        "none": 482,
+        "parse_failure": 9,
+        "truncated_json": 9
+      },
+      "latency_ms": {
+        "mean": 1571.3,
+        "p50": 4.4,
+        "p95": 11428.5
+      }
+    },
+    "livecodebench": {
+      "total_samples": 400,
+      "correct": 0,
+      "accuracy": 0.0,
+      "error_breakdown": {
+        "compilation_error": 213,
+        "runtime_error": 181,
+        "truncated_json": 6
+      },
+      "latency_ms": {
+        "mean": 1588.5,
+        "p50": 5.2,
+        "p95": 11555.0
+      }
+    }
+  },
+  "overall": {
+    "total_samples": 1098,
+    "total_correct": 54,
+    "overall_accuracy": 0.0492
+  }
+}

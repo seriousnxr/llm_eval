@@ -32,16 +32,13 @@ class Math500Task(BaseTask):
         self._dataset: list[dict[str, Any]] | None = None
 
     def load_dataset(self) -> list[dict[str, Any]]:
-        """Load first 500 problems from lighteval/MATH test split."""
+        """Load MATH-500 dataset (500 problems)."""
         if self._dataset is not None:
             return self._dataset
 
         logger.info("Loading MATH500 dataset...")
-        ds = load_dataset("lighteval/MATH", split="test")
-        all_samples = [dict(row) for row in ds]
-
-        # Take first 500 problems
-        self._dataset = all_samples[:500]
+        ds = load_dataset("math-ai/math500", split="test")
+        self._dataset = [dict(row) for row in ds]
         logger.info("Loaded %d MATH samples", len(self._dataset))
         return self._dataset
 
