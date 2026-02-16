@@ -49,6 +49,9 @@ class EvalRunner:
         self.results: dict[str, list[SampleResult]] = {}
         self._interrupted = False
         self._current_task: Any = None  # track in-flight task for interrupt
+        self._start_time: float = 0.0
+        self._task_wall_times: dict[str, float] = {}
+        self._current_task_start: float = 0.0
 
         # Set up signal handler for graceful interruption
         signal.signal(signal.SIGINT, self._handle_interrupt)
@@ -70,8 +73,28 @@ class EvalRunner:
             partial = task.partial_results
             if partial:
                 self.results[task.task_name] = list(partial)
+                # Record elapsed time for the interrupted task
+                if task.task_name not in self._task_wall_times:
+                    self._task_wall_times[task.task_name] = (
+                        time.perf_counter() - self._current_task_start
+                    )
 
         self._save_results()
+
+        # Generate summary report from whatever we have so far
+        wall_clock = (
+            time.perf_counter() - self._start_time
+            if self._start_time > 0
+            else 0.0
+        )
+        if self.results:
+            results_dir = self.config.ensure_output_dir()
+            report = build_summary_report(
+                self.results, wall_clock, self._task_wall_times
+            )
+            write_summary_report(report, results_dir / "summary_report.json")
+            logger.info("Partial summary report saved")
+
         sys.exit(0)
 
     def _build_task(self, task_name: str) -> GPQATask | Math500Task | LiveCodeBenchTask:
@@ -127,15 +150,15 @@ class EvalRunner:
         logger.info("Results dir: %s", results_dir)
         logger.info("=" * 60)
 
-        start_time = time.perf_counter()
-        task_wall_times: dict[str, float] = {}
+        self._start_time = time.perf_counter()
+        self._task_wall_times = {}
 
         for task_name in self.requested_tasks:
             if self._interrupted:
                 break
 
             logger.info("--- Running task: %s ---", task_name)
-            task_start = time.perf_counter()
+            self._current_task_start = time.perf_counter()
 
             try:
                 task = self._build_task(task_name)
@@ -144,8 +167,8 @@ class EvalRunner:
                 self._current_task = None
                 self.results[task_name] = task_results
 
-                task_elapsed = time.perf_counter() - task_start
-                task_wall_times[task_name] = task_elapsed
+                task_elapsed = time.perf_counter() - self._current_task_start
+                self._task_wall_times[task_name] = task_elapsed
                 correct = sum(1 for r in task_results if r.score > 0)
                 total = len(task_results)
                 accuracy = correct / total if total > 0 else 0.0
@@ -162,13 +185,13 @@ class EvalRunner:
                 logger.exception("Task %s failed", task_name)
                 self.results[task_name] = []
 
-        wall_clock = time.perf_counter() - start_time
+        wall_clock = time.perf_counter() - self._start_time
 
         # Save results
         self._save_results()
 
         # Generate summary report
-        report = build_summary_report(self.results, wall_clock, task_wall_times)
+        report = build_summary_report(self.results, wall_clock, self._task_wall_times)
         write_summary_report(report, results_dir / "summary_report.json")
 
         logger.info("=" * 60)
