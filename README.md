@@ -147,6 +147,25 @@ LiveCodeBench additionally: `problem_id`, `generated_code`, `test_results`, `pas
 - **Isolation**: Temp directory per execution, minimal `PATH` env
 - **Cleanup**: Process group kill + temp dir removal in `finally` block
 
+## Results Dashboard
+
+A self-contained HTML dashboard visualizes the evaluation results:
+
+```bash
+python3 build_dashboard.py
+open dashboard.html
+```
+
+The dashboard includes:
+- Summary cards (total samples, accuracy, correct count)
+- Per-task accuracy bars and donut charts
+- Error breakdown across all tasks
+- Latency scatter plots (mean / p50 / p95)
+- Interactive sample browser with filtering, search, and keyboard navigation (← →)
+- Side-by-side predicted vs ground truth comparison
+- LiveCodeBench test-case pass/fail indicators
+- Full error log table
+
 ## Batching & Checkpointing
 
 Samples are processed in chunks of `batch_size` (default: 50):

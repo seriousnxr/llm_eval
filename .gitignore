@@ -13,6 +13,7 @@ env/
 *.log
 .DS_Store
 results/
+results_*/
 *.jsonl
 !tests/fixtures/*.jsonl
 .pytest_cache/
