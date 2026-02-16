@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -11,7 +10,7 @@ from typing import Any
 
 from tqdm import tqdm
 
-from eval_harness.client import ClientResponse, EvalClient
+from eval_harness.client import EvalClient
 from eval_harness.config import EvalConfig
 
 logger = logging.getLogger(__name__)
@@ -45,6 +44,8 @@ class BaseTask(ABC):
 
     def __init__(self, config: EvalConfig) -> None:
         self.config = config
+        self.partial_results: list[SampleResult] = []
+        self._executor: ThreadPoolExecutor | None = None
 
     @abstractmethod
     def load_dataset(self) -> list[dict[str, Any]]:
@@ -139,9 +140,8 @@ class BaseTask(ABC):
         """
         dataset = self.load_dataset()
         total = len(dataset)
-        # Store results on the instance so the runner's interrupt handler
-        # can access partial progress via task.partial_results.
-        self.partial_results: list[SampleResult] = []
+        # Reset for this run; accessible to the runner's interrupt handler.
+        self.partial_results = []
 
         max_workers = self.config.concurrency.max_workers
         batch_size = self.config.concurrency.batch_size
@@ -160,6 +160,7 @@ class BaseTask(ABC):
 
         completed = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            self._executor = executor
             futures = {
                 executor.submit(_eval, (idx, sample)): idx
                 for idx, sample in enumerate(dataset)
@@ -198,6 +199,8 @@ class BaseTask(ABC):
                             completed,
                             total,
                         )
+
+        self._executor = None
 
         # Sort by sample_id to maintain deterministic order
         self.partial_results.sort(key=lambda r: int(r.sample_id))

@@ -6,7 +6,6 @@ import logging
 import signal
 import sys
 import time
-from pathlib import Path
 from typing import Any
 
 from eval_harness.client import EvalClient
@@ -69,8 +68,14 @@ class EvalRunner:
 
         # Capture partial results from the in-flight task
         task = self._current_task
-        if task is not None and hasattr(task, "partial_results"):
-            partial = task.partial_results
+        if task is not None:
+            # Cancel pending futures so the executor exits immediately
+            # instead of waiting for all queued samples to complete.
+            executor = getattr(task, "_executor", None)
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+            partial = getattr(task, "partial_results", [])
             if partial:
                 self.results[task.task_name] = list(partial)
                 # Record elapsed time for the interrupted task
