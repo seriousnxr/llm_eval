@@ -64,31 +64,7 @@ pytest tests/ -v
 
 ## Configuration
 
-Edit `config.yaml` to customize:
-
-```yaml
-server:
-  base_url: "http://localhost:8000"
-  model: "gpt-4"
-  temperature: 0.0
-  max_tokens: 2048
-  top_p: 1.0
-  stop: null
-  timeout_seconds: 30
-
-retry:
-  max_retries: 10
-  base_delay: 1.0
-  max_delay: 60.0
-  retry_status_codes: [429, 503]
-
-concurrency:
-  max_workers: 3
-  batch_size: 50
-
-output:
-  results_dir: "results"
-```
+Edit `config.yaml` to customize server, retry, concurrency, and output settings. See `config.yaml` for all available options.
 
 ## Architecture
 
