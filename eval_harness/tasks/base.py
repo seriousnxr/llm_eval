@@ -135,7 +135,9 @@ class BaseTask(ABC):
         """
         dataset = self.load_dataset()
         total = len(dataset)
-        results: list[SampleResult] = []
+        # Store results on the instance so the runner's interrupt handler
+        # can access partial progress via task.partial_results.
+        self.partial_results: list[SampleResult] = []
 
         max_workers = self.config.concurrency.max_workers
         batch_size = self.config.concurrency.batch_size
@@ -168,7 +170,28 @@ class BaseTask(ABC):
                         for item in batch
                     }
                     for future in as_completed(futures):
-                        results.append(future.result())
+                        try:
+                            result = future.result()
+                        except Exception:
+                            sample_idx = futures[future]
+                            logger.exception(
+                                "%s: sample %d raised an unexpected error",
+                                self.task_name,
+                                sample_idx,
+                            )
+                            result = SampleResult(
+                                task=self.task_name,
+                                sample_id=str(sample_idx),
+                                prompt="",
+                                raw_response="",
+                                parsed_answer=None,
+                                normalized_answer=None,
+                                ground_truth="",
+                                score=0.0,
+                                error_category="unhandled_error",
+                                latency_ms=0.0,
+                            )
+                        self.partial_results.append(result)
                         pbar.update(1)
 
                 logger.debug(
@@ -181,5 +204,5 @@ class BaseTask(ABC):
                 )
 
         # Sort by sample_id to maintain deterministic order
-        results.sort(key=lambda r: int(r.sample_id))
-        return results
+        self.partial_results.sort(key=lambda r: int(r.sample_id))
+        return self.partial_results

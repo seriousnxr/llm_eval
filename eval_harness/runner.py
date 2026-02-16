@@ -48,6 +48,7 @@ class EvalRunner:
         self.client = EvalClient(config)
         self.results: dict[str, list[SampleResult]] = {}
         self._interrupted = False
+        self._current_task: Any = None  # track in-flight task for interrupt
 
         # Set up signal handler for graceful interruption
         signal.signal(signal.SIGINT, self._handle_interrupt)
@@ -62,6 +63,14 @@ class EvalRunner:
             "Interrupt received — saving partial results and exiting..."
         )
         self._interrupted = True
+
+        # Capture partial results from the in-flight task
+        task = self._current_task
+        if task is not None and hasattr(task, "partial_results"):
+            partial = task.partial_results
+            if partial:
+                self.results[task.task_name] = list(partial)
+
         self._save_results()
         sys.exit(0)
 
@@ -130,7 +139,9 @@ class EvalRunner:
 
             try:
                 task = self._build_task(task_name)
+                self._current_task = task
                 task_results = task.run(self.client)
+                self._current_task = None
                 self.results[task_name] = task_results
 
                 task_elapsed = time.perf_counter() - task_start
