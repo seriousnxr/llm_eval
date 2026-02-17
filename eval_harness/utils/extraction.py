@@ -171,8 +171,43 @@ def normalize_math_answer(answer: str | None) -> str | None:
         "", s, flags=re.IGNORECASE,
     )
 
-    # Convert \dfrac{a}{b} and \frac{a}{b} → a/b
-    s = re.sub(r"\\d?frac\{([^}]+)\}\{([^}]+)\}", r"\1/\2", s)
+    # Convert \dfrac{a}{b} and \frac{a}{b} → a/b  (supports nested braces)
+    def _convert_frac(text: str) -> str:
+        """Replace \\frac{...}{...} handling nested braces."""
+        m = re.search(r"\\d?frac\{", text)
+        if m is None:
+            return text
+        # Find numerator brace group
+        pos = m.end() - 1  # position of opening {
+        depth, i = 1, pos + 1
+        while i < len(text) and depth > 0:
+            if text[i] == "{": depth += 1
+            elif text[i] == "}": depth -= 1
+            i += 1
+        if depth != 0:
+            return text
+        num = text[pos + 1 : i - 1]
+        # Find denominator brace group
+        if i >= len(text) or text[i] != "{":
+            return text
+        pos2 = i
+        depth, i = 1, pos2 + 1
+        while i < len(text) and depth > 0:
+            if text[i] == "{": depth += 1
+            elif text[i] == "}": depth -= 1
+            i += 1
+        if depth != 0:
+            return text
+        den = text[pos2 + 1 : i - 1]
+        return text[: m.start()] + f"{num}/{den}" + text[i:]
+
+    # Apply iteratively until no more \frac patterns
+    while re.search(r"\\d?frac\{", s):
+        new_s = _convert_frac(s)
+        if new_s == s:
+            break
+        s = new_s
+
     # Handle shorthand \frac12 or \frac{1}2 or \frac1{2} (no braces)
     s = re.sub(r"\\d?frac\{([^}]+)\}(\d)", r"\1/\2", s)
     s = re.sub(r"\\d?frac(\d)\{([^}]+)\}", r"\1/\2", s)
@@ -262,3 +297,9 @@ def extract_code_from_response(text: str) -> str:
 
     # If no fences, return the full text (model might have returned raw code)
     return text.strip()
+
+
+
+if __name__ == "__main__":
+    s = "frac{\sqrt{2}}{2}"
+    print(normalize_math_answer(s))
